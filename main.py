@@ -3,26 +3,28 @@ import matplotlib.pyplot as plt
 from scipy.signal import fftconvolve
 import fluidsynth
 import time
+import argparse
 from pathlib import Path
+from sf2utils.sf2parse import Sf2File
 
 # ==========================================
-# 1. 人耳心理声学核函数 R(f1, f2) - Plomp-Levelt 模型
+# 1. Psychoacoustic roughness kernel R(f1, f2) - Plomp-Levelt model
 # ==========================================
 def plomp_levelt_raw(f1, f2):
     """
-    计算两个纯音 (f1, f2) 之间的粗糙度 (Roughness/Dissonance)
+    Calculate the roughness (dissonance) between two pure tones (f1, f2).
     """
     f_min = np.minimum(f1, f2)
     f_diff = np.abs(f1 - f2)
     
-    # 临界频带 (Critical Bandwidth) 的近似表达
+    # Approximation of the critical bandwidth.
     cbw = 24.7 * (4.37 * f_min / 1000.0 + 1.0)
     
-    # 相对频率差 x
+    # Relative frequency difference x.
     x = f_diff / cbw
     
-    # Plomp-Levelt 拟合曲线: a * exp(-b*x) - a * exp(-c*x)
-    # 当 x ≈ 0.25 时达到刺耳峰值
+    # Plomp-Levelt fit: a * exp(-b*x) - a * exp(-c*x).
+    # The roughness peak occurs near x ≈ 0.25.
     a, b, c = 3.5, 3.5, 5.75
     r = a * (np.exp(-b * x) - np.exp(-c * x))
     r[x < 0] = 0
@@ -30,7 +32,7 @@ def plomp_levelt_raw(f1, f2):
 
 
 # ==========================================
-# 2. 从 SF2 文件渲染音符并提取频谱 S(f_base, f)
+# 2. Render notes from an SF2 file and extract spectra S(f_base, f)
 # ==========================================
 class SF2SpectrumExtractor:
     def __init__(self, sf2_path, sample_rate=44100):
@@ -38,28 +40,59 @@ class SF2SpectrumExtractor:
         self.sr = sample_rate
         self.fs = fluidsynth.Synth(samplerate=int(sample_rate))
         self.sfid = self.fs.sfload(self.sf2_path)
-        self.fs.program_select(0, self.sfid, 0, 0)
+        self.sf2_handle = open(self.sf2_path, "rb")
+        self.sf2_parser = Sf2File(self.sf2_handle)
+        bank, preset, preset_name, midi_range = self._find_preset()
+        if self.fs.program_select(0, self.sfid, bank, preset) != 0:
+            raise RuntimeError(
+                f"Unable to select SF2 preset: bank={bank}, preset={preset}, "
+                f"name={preset_name!r}"
+            )
+        self.midi_range = midi_range
+        print(f"Selected SF2 preset: bank={bank}, preset={preset}, name={preset_name}")
+        print(f"Declared SF2 MIDI key range: {midi_range.start}–{midi_range.stop}")
+
+    def _find_preset(self):
+        """Select the default preset and read its SF2 keyRange."""
+        default_name = self.fs.sfpreset_name(self.sfid, 0, 0)
+        candidates = [(0, 0, default_name)] if default_name is not None else []
+        for bank in range(128):
+            for preset in range(128):
+                if (bank, preset) == (0, 0):
+                    continue
+                preset_name = self.fs.sfpreset_name(self.sfid, bank, preset)
+                if preset_name is not None:
+                    candidates.append((bank, preset, preset_name))
+        for bank, preset, preset_name in candidates:
+            for sf2_preset in self.sf2_parser.presets:
+                if (
+                    getattr(sf2_preset, "bank", None) == bank
+                    and getattr(sf2_preset, "preset", None) == preset
+                ):
+                    return bank, preset, preset_name, sf2_preset.key_range
+
+        raise RuntimeError(f"No usable preset found in SF2 file: {self.sf2_path}")
 
     def get_spectrum(self, midi_note, num_samples=22050):
         """
-        触发特定 MIDI 音符，提取稳态频谱
+        Trigger a MIDI note and extract its steady-state spectrum.
         """
         self.fs.noteon(0, midi_note, 100)
-        # 预热一小段时间避开初始瞬态噪声
+        # Warm up briefly to avoid the initial transient.
         _ = self.fs.get_samples(4410) 
-        # 提取稳态波形
+        # Extract the steady-state waveform.
         samples = self.fs.get_samples(num_samples)
         self.fs.noteoff(0, midi_note)
         
-        # 声道合并 (Stereo -> Mono)
+        # Mix stereo channels down to mono.
         samples_mono = samples[0::2].astype(np.float64) / 32768.0
         
-        # 加窗并进行 FFT
+        # Apply a window and compute the FFT.
         window = np.hanning(len(samples_mono))
         fft_data = np.abs(np.fft.rfft(samples_mono * window))
         freqs = np.fft.rfftfreq(len(samples_mono), 1.0 / self.sr)
         
-        # 归一化幅度谱
+        # Normalize the magnitude spectrum.
         max_val = np.max(fft_data)
         if max_val > 0:
             fft_data /= max_val
@@ -68,109 +101,160 @@ class SF2SpectrumExtractor:
 
 
 # ==========================================
-# 3. 计算双音不和谐度 D(fA, fB)
+# 3. Calculate the two-note dissonance D(fA, fB)
 # ==========================================
 def calculate_dissonance_matrix(extractor, midi_range=range(36, 85), freq_max=10000):
     """
-    遍历 MIDI 音符范围，计算二维不和谐度矩阵 D[A, B]
-    midi_range: 默认 C2 (36) 到 C6 (84)
+    Iterate over the MIDI note range and calculate the 2D dissonance matrix
+    D[A, B].
     """
     notes = list(midi_range)
     N = len(notes)
     
-    # 预先提取所有音符的频谱，避免重复计算
-    print("正在从 SF2 文件提取各音高频谱...")
+    # Extract all note spectra once to avoid repeated computation.
+    print("Extracting note spectra from the SF2 file...")
     spectra = []
     for note in notes:
         freqs, spec = extractor.get_spectrum(note)
-        # 截断高频，减少不必要的计算
+        # Limit high frequencies to reduce unnecessary computation.
         valid_idx = freqs <= freq_max
-        # 降采样/阈值化去噪，保留有能量的频点
+        # Remove low-energy frequency bins as a noise filter.
         f_active = freqs[valid_idx]
         s_active = spec[valid_idx]
-        mask = s_active > 0.01 # 忽略弱于 -40dB 的杂音
+        mask = s_active > 0.01  # Ignore components below -40 dB.
         
         spectra.append((f_active[mask], s_active[mask]))
 
     D = np.zeros((N, N))
-    print("正在计算双音不和谐度矩阵 D(f_A, f_B)...")
+    print("Calculating the two-note dissonance matrix D(f_A, f_B)...")
     start_time = time.time()
     
-    # 双重循环计算两音之间的离散互干涉 (连续积分的离散采样)
+    # Compute pairwise discrete interference (a sampled continuous integral).
     for i in range(N):
         fA_vec, sA_vec = spectra[i]
         for j in range(i, N):
             fB_vec, sB_vec = spectra[j]
             
-            # 构建两两频点的网格
+            # Build a grid of all frequency-bin pairs.
             f1_mesh, f2_mesh = np.meshgrid(fA_vec, fB_vec, indexing='ij')
             s1_mesh, s2_mesh = np.meshgrid(sA_vec, sB_vec, indexing='ij')
             
-            # 计算有效能量: min(S1, S2)
+            # Calculate the effective energy: min(S1, S2).
             energy_mesh = np.minimum(s1_mesh, s2_mesh)
             
-            # 计算粗糙核 R(f1, f2)
+            # Calculate the roughness kernel R(f1, f2).
             r_mesh = plomp_levelt_raw(f1_mesh, f2_mesh)
             
-            # 全频段积分求和
+            # Sum across the full frequency range.
             dissonance = np.sum(energy_mesh * r_mesh)
             
             D[i, j] = dissonance
-            D[j, i] = dissonance # 对称矩阵
+            D[j, i] = dissonance  # The matrix is symmetric.
 
-    print(f"计算完成，耗时: {time.time() - start_time:.2f} 秒")
+    print(f"Calculation complete in {time.time() - start_time:.2f} seconds.")
     return notes, D
 
 
 # ==========================================
-# 4. 绘制热力图 (Heatmap)
+# 4. Plot the heatmap
 # ==========================================
-def plot_dissonance_heatmap(notes, D):
+def plot_dissonance_heatmap(notes, D, sf2_path):
     plt.figure(figsize=(10, 8))
     
-    # 将 MIDI 转换为音名 (例如 60 -> C4)
+    # Convert MIDI numbers to note names (for example, 60 -> C4).
     note_names = []
     names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
     for n in notes:
         name = f"{names[n % 12]}{n // 12 - 1}"
         note_names.append(name)
         
-    # 绘制热力图
-    # 使用 imshow，Origin 放在左下角
+    # Plot the heatmap with the origin in the lower-left corner.
     im = plt.imshow(D, cmap='magma', origin='lower', aspect='auto')
     
-    plt.colorbar(im, label='Sensory Dissonance D(f_A, f_B)')
+    plt.colorbar(im, label='Sensory Dissonance $D(f_A, f_B)$')
     
-    # 设置坐标轴标签 (每隔几个音标出一个)
+    # Set axis labels, showing every few notes.
     step = 3 if len(notes) > 30 else 1
     plt.xticks(ticks=np.arange(0, len(notes), step), labels=note_names[::step], rotation=45)
     plt.yticks(ticks=np.arange(0, len(notes), step), labels=note_names[::step])
     
     plt.xlabel('Base Note A ($f_A$)')
     plt.ylabel('Base Note B ($f_B$)')
-    plt.title('Piano SF2 Sensory Dissonance Heatmap $D(f_A, f_B)$')
+    plt.title('SF2 Sensory Dissonance Heatmap $D(f_A, f_B)$')
     
     plt.tight_layout()
-    output_path = Path(__file__).with_name("dissonance_heatmap.png")
+    
+    # Save to the output directory using the SF2 filename.
+    output_dir = Path(__file__).parent / "output"
+    output_dir.mkdir(exist_ok=True)
+    sf2_name = Path(sf2_path).stem
+    output_path = output_dir / f"{sf2_name}_Dissonance_Heatmap.png"
     plt.savefig(output_path, dpi=150)
 
     # Headless environments use the non-interactive Agg backend.
     if plt.get_backend().lower() == "agg":
-        print(f"热力图已保存至: {output_path}")
+        print(f"Heatmap saved to: {output_path}")
     else:
         plt.show()
 
 # ==========================================
-# 主程序入口
+# Program entry point
 # ==========================================
 if __name__ == "__main__":
-    # 替换为你实际的 sf2 文件路径
-    SF2_FILE = "soundfonts/SRX_Acoustic_Bass.sf2" 
+    parser = argparse.ArgumentParser(
+        description="Calculate an SF2 instrument's dissonance heatmap"
+    )
+    parser.add_argument(
+        "--sf2",
+        default=None,
+        help="Path to the SF2 file",
+    )
+    parser.add_argument(
+        "--midi-start",
+        type=int,
+        default=None,
+        help="Starting MIDI note (inclusive; defaults to the SF2 keyRange)",
+    )
+    parser.add_argument(
+        "--midi-end",
+        type=int,
+        default=None,
+        help="Ending MIDI note (inclusive; defaults to the SF2 keyRange)",
+    )
+    args = parser.parse_args()
+
+    if args.midi_start is not None and not 0 <= args.midi_start <= 127:
+        parser.error("MIDI notes must be between 0 and 127")
+    if args.midi_end is not None and not 0 <= args.midi_end <= 127:
+        parser.error("MIDI notes must be between 0 and 127")
+    if (
+        args.midi_start is not None
+        and args.midi_end is not None
+        and args.midi_start > args.midi_end
+    ):
+        parser.error("--midi-start cannot be greater than --midi-end")
     
     try:
-        extractor = SF2SpectrumExtractor(SF2_FILE)
-        # 计算 C2 (36) 到 C6 (84) 之间的音高不和谐度
-        notes, D_matrix = calculate_dissonance_matrix(extractor, midi_range=range(36, 85))
-        plot_dissonance_heatmap(notes, D_matrix)
+        extractor = SF2SpectrumExtractor(args.sf2)
+        midi_start = (
+            args.midi_start
+            if args.midi_start is not None
+            else extractor.midi_range.start
+        )
+        midi_end = (
+            args.midi_end
+            if args.midi_end is not None
+            else extractor.midi_range.stop
+        )
+        if midi_start > midi_end:
+            parser.error("--midi-start cannot be greater than --midi-end")
+        notes, D_matrix = calculate_dissonance_matrix(
+            extractor,
+            midi_range=range(
+                midi_start,
+                midi_end + 1,
+            ),
+        )
+        plot_dissonance_heatmap(notes, D_matrix, args.sf2)
     except Exception as e:
-        print(f"运行出错 (可能是缺少 SF2 文件或 FluidSynth 环境): {e}")
+        print(f"Runtime error (possibly a missing SF2 file or FluidSynth): {e}")
