@@ -1,8 +1,6 @@
 # Dissonance
 
-This project calculates the perceptual dissonance between MIDI notes using the
-spectrum of an SF2 SoundFont instrument and the Plomp-Levelt model. The result
-is visualized as a heatmap.
+This project calculates the perceptual dissonance between MIDI notes using the spectrum of an SF2 SoundFont instrument and the Plomp-Levelt model. The result is visualized as a heatmap.
 
 The program:
 
@@ -34,16 +32,14 @@ sudo apt install fluidsynth libfluidsynth3
 Run the program with an SF2 file:
 
 ```bash
-python main.py --sf2 soundfonts/040_Florestan_String_Quartet.sf2
+python main.py --sf2 soundfonts/000_000_Piano_1.sf2
 ```
 
-If no MIDI range is specified, the program uses the `keyRange` declared by the
-selected SoundFont preset. You can also specify a custom range; the end note
-is inclusive:
+If no MIDI range is specified, the program uses the `keyRange` declared by the selected SoundFont preset. You can also specify a custom range; the end note is inclusive:
 
 ```bash
 python main.py \
-  --sf2 soundfonts/040_Florestan_String_Quartet.sf2 \
+  --sf2 soundfonts/000_000_Piano_1.sf2 \
   --midi-start 55 \
   --midi-end 100
 ```
@@ -53,6 +49,25 @@ MIDI note numbers must be between `0` and `127`. For example:
 - Violin: approximately `G3–E7`, or `55–100`
 - Piano: approximately `A0–C8`, or `21–108`
 
+To calculate and plot only one row of the dissonance matrix, use `--note` with a note name such as `A3`. The horizontal axis still uses the selected MIDI range:
+
+```bash
+python main.py \
+  --sf2 soundfonts/000_000_Piano_1.sf2 \
+  --note A3 \
+  --midi-start 55 \
+  --midi-end 100
+```
+
+This produces a bar chart containing `D(A3, f_B)` for every note in the
+comparison range. The output filename includes the selected note, for example:
+
+```text
+output/000_000_Piano_1_Dissonance_A3_BarChart.png
+```
+
+Sharp note names are supported, from `C-1` to `G9`.
+
 Show all available options:
 
 ```bash
@@ -61,21 +76,20 @@ python main.py --help
 
 ## Output
 
-Results are saved in the project's `output/` directory. The output filename is
-derived from the SF2 filename, for example:
+Results are saved in the project's `output/` directory. The output filename is derived from the SF2 filename, for example:
 
 ```text
 output/040_Florestan_String_Quartet_Dissonance_Heatmap.png
 ```
 
-The horizontal and vertical axes represent MIDI notes. The color indicates the
-dissonance of each note pair.
+The horizontal and vertical axes represent MIDI notes. The color indicates the dissonance of each note pair.
+
+When `--note` is used, the output is a bar chart instead of a heatmap. For
+example, `A3` is saved as
+`*_Dissonance_A3_BarChart.png`.
 
 ## Notes
 
-- An SF2 `keyRange` describes the sample-mapping range and may not equal the
-  instrument's natural playing range.
-- Different instruments have different spectral structures, so absolute
-  dissonance values should not be compared directly across SF2 files.
-- The program prefers Bank 0 / Program 0. If that preset does not exist, it
-  automatically selects the first available preset.
+- An SF2 `keyRange` describes the sample-mapping range and may not equal the instrument's natural playing range.
+- Different instruments have different spectral structures, so absolute dissonance values should not be compared directly across SF2 files.
+- The program prefers Bank 0 / Program 0. If that preset does not exist, it automatically selects the first available preset.
