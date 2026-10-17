@@ -175,6 +175,37 @@ def midi_to_note_name(midi_note):
     return f"{NOTE_NAMES[midi_note % 12]}{midi_note // 12 - 1}"
 
 
+def filename_note_name(midi_note):
+    return midi_to_note_name(midi_note).replace('#', 'sharp')
+
+
+def format_note_range(notes):
+    return f"{filename_note_name(notes[0])}-{filename_note_name(notes[-1])}"
+
+
+def resolve_sf2_path(sf2_input):
+    """Resolve an SF2 path or a filename from the soundfonts directory."""
+    input_path = Path(sf2_input)
+    candidates = [input_path]
+    if input_path.suffix.lower() != ".sf2":
+        candidates.append(input_path.with_suffix(".sf2"))
+
+    soundfonts_dir = Path(__file__).parent / "soundfonts"
+    soundfonts_path = soundfonts_dir / input_path
+    candidates.append(soundfonts_path)
+    if input_path.suffix.lower() != ".sf2":
+        candidates.append(soundfonts_path.with_suffix(".sf2"))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        f"SF2 file not found: {sf2_input!r}. "
+        "Pass a path or an SF2 filename from the soundfonts directory."
+    )
+
+
 def plot_dissonance_heatmap(notes, D, sf2_path):
     plt.figure(figsize=(10, 8))
 
@@ -201,7 +232,8 @@ def plot_dissonance_heatmap(notes, D, sf2_path):
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
     sf2_name = Path(sf2_path).stem
-    output_path = output_dir / f"{sf2_name}_Dissonance_Heatmap.png"
+    note_range = format_note_range(notes)
+    output_path = output_dir / f"{sf2_name}_{note_range}.png"
     plt.savefig(output_path, dpi=150)
     plt.close()
 
@@ -229,9 +261,10 @@ def plot_dissonance_bar_chart(notes, D, row_note, sf2_path):
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
     sf2_name = Path(sf2_path).stem
-    filename_note = row_note_name.replace('#', 'sharp')
+    note_range = format_note_range(notes)
+    filename_note = filename_note_name(row_note)
     output_path = output_dir / (
-        f"{sf2_name}_Dissonance_{filename_note}_BarChart.png"
+        f"{sf2_name}_{filename_note}_{note_range}.png"
     )
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -252,7 +285,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sf2",
         default=None,
-        help="Path to the SF2 file",
+        help="SF2 path or filename in soundfonts/ (the .sf2 suffix is optional)",
     )
     parser.add_argument(
         "--midi-start",
@@ -305,7 +338,8 @@ if __name__ == "__main__":
         return midi_note
     
     try:
-        extractor = SF2SpectrumExtractor(args.sf2)
+        sf2_path = resolve_sf2_path(args.sf2)
+        extractor = SF2SpectrumExtractor(str(sf2_path))
         row_note = None
         if args.note is not None:
             try:
@@ -333,8 +367,8 @@ if __name__ == "__main__":
             row_note=row_note,
         )
         if row_note is None:
-            plot_dissonance_heatmap(notes, D_matrix, args.sf2)
+            plot_dissonance_heatmap(notes, D_matrix, sf2_path)
         else:
-            plot_dissonance_bar_chart(notes, D_matrix, row_note, args.sf2)
+            plot_dissonance_bar_chart(notes, D_matrix, row_note, sf2_path)
     except Exception as e:
         print(f"Runtime error (possibly a missing SF2 file or FluidSynth): {e}")
